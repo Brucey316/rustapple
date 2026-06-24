@@ -1,7 +1,7 @@
 use futures::stream::TryStreamExt;
 use netlink_wi::{
-    AsyncNlSocket, MonitorFlags,
-    interface::{InterfaceType, WirelessInterface},
+    AsyncNlSocket, ChannelConfig, MonitorFlags,
+    interface::{ChannelWidth, InterfaceType, WirelessInterface},
     wiphy::{Frequency, PhysicalDevice},
 };
 use rtnetlink::{Handle, LinkUnspec, new_connection, packet_route::link::LinkMessage};
@@ -15,7 +15,7 @@ pub enum InterfaceError {
 impl fmt::Display for InterfaceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InterfaceNotFound(name) => write!(f, "Interface {} not found\n", name),
+            Self::InterfaceNotFound(name) => writeln!(f, "Interface {} not found", name),
             Self::RtNetlinkError(error) => write!(f, "{}", error),
         }
     }
@@ -66,8 +66,6 @@ impl Interface {
         let link = self.get_ip_link_by_name().await?;
         let index = link.header.index;
 
-        println!("Index found {}", index);
-
         self.handle
             .link()
             .set(LinkUnspec::new_with_index(index).up().build())
@@ -91,7 +89,6 @@ impl Interface {
     async fn get_wireless_interface(&self) -> Result<WirelessInterface, InterfaceError> {
         if let Ok(interfaces) = self.nl_socket.list_interfaces().await {
             for interface in interfaces {
-                println!("{} == {}", interface.name, self.name);
                 if interface.name.eq(&self.name) {
                     return Ok(interface);
                 }
@@ -118,7 +115,6 @@ impl Interface {
 
     pub async fn get_channels(&self) -> Option<Vec<Frequency>> {
         if let Ok(phys) = self.get_physical_device().await {
-            println!("Got the phys");
             let mut supported_freqs: Vec<Frequency> = Vec::new();
             if let Some(band2) = phys.band_2ghz {
                 supported_freqs.extend(band2.frequencies);
@@ -137,6 +133,15 @@ impl Interface {
         }
         println!("Failed");
         None
+    }
+
+    pub async fn set_channel(&self, freq: u32) -> Result<(), InterfaceError> {
+        let if_index: u32 = self.get_wireless_interface().await?.interface_index;
+        let config = ChannelConfig::new(if_index, freq, ChannelWidth::Width20);
+        self.nl_socket
+            .set_channel(config)
+            .await
+            .map_err(|_| InterfaceError::RtNetlinkError("Failed to set channel".to_string()))
     }
 
     pub async fn set_mode(&self, mode: InterfaceType) -> Result<(), InterfaceError> {

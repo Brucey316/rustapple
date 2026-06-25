@@ -9,7 +9,12 @@ Application that utilizes a wifi card to scan available frequencies for access p
 
 ## Download External Dependancies
 
+```bash
 sudo apt install libpcap-dev
+```
+
+Error if dependancy not met:
+`rust-lld: error: unable to find library -lpcap`
 
 ---
 
@@ -48,8 +53,8 @@ erDiagram
     Client{
         MacAddress essid
         u8 deauth_cnt
-        Option(EapolKey) message1 
-        Option(EapolKey) message2 
+        Option(EapolKey) message1
+        Option(EapolKey) message2
         Option(EapolKey) message3
     }
 ```

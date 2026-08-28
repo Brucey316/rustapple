@@ -1,37 +1,44 @@
-use crate::AP;
-use libwifi::frame::components::{MacAddress, WpsSetupState};
+use crate::pineapple::{AP, Station};
+
+use libwifi::error::Error;
+use libwifi::frame::components::{MacAddress, RsnAkmSuite, WpsSetupState};
 use libwifi::frame::{AssociationRequest, AssociationResponse, Beacon, ProbeResponse, QosData};
 use libwifi::{Addresses, Frame};
-use std::collections::HashMap;
 
-pub fn parse_frame(frame: Frame, channel_data: &mut HashMap<u32, HashMap<MacAddress, AP>>) {
-    // TODO: Learn how to handle each packet individually
-    // Are they really all the same??? Am I focused on directionality?
+pub fn parse_frame(frame: Frame) -> Result<(Option<AP>, Option<Station>), Error> {
+    let mut ap: Option<AP> = None;
+    let mut _station: Option<Station> = None;
 
     match frame {
         // AP Specific Packets
-        Frame::Beacon(beacon) => parse_beacon(beacon, channel_data),
-        Frame::ProbeResponse(probe_response) => { /*parse_probe_response(probe_response)*/ }
+        Frame::Beacon(beacon) => {
+            let res = parse_beacon(beacon)?;
+            ap = Some(res);
+        }
+        Frame::ProbeResponse(_probe_response) => {
+            // parse_probe_request(probe_response)
+        }
         // Station Specific Packets
-        Frame::AssociationRequest(association_request) => {
+        Frame::AssociationRequest(_association_request) => {
             // parse_association_request(association_request)
         }
-        Frame::AssociationResponse(association_response) => {
+        Frame::AssociationResponse(_association_response) => {
             // parse_association_response(association_response)
         }
-        Frame::QosData(qos_data) => { /*parse_qos_data(qos_data)*/ }
+        Frame::QosData(_qos_data) => { /*parse_qos_data(qos_data)*/ }
         _ => {
             //println!("{:?}", frame)
         }
     }
+
+    Ok((ap, _station))
 }
 
-fn parse_beacon(beacon_frame: Beacon, channel_data: &mut HashMap<u32, HashMap<MacAddress, AP>>) {
+fn parse_beacon(beacon_frame: Beacon) -> Result<AP, Error> {
     let station_info = &beacon_frame.station_info;
-    let mut ap;
 
-    if let (_, _, Some(bssid)) = parse_header(&beacon_frame.header) {
-        ap = AP::new(station_info.ssid(), bssid);
+    let bssid = if let (_, _, Some(bssid)) = parse_header(&beacon_frame.header) {
+        bssid
     } else {
         let header = &beacon_frame.header;
         println!(
@@ -40,51 +47,39 @@ fn parse_beacon(beacon_frame: Beacon, channel_data: &mut HashMap<u32, HashMap<Ma
             header.address_2.to_long_string(),
             header.address_3.to_long_string(),
         );
-        return;
+        return Err(Error::Failure(
+            "Failed to Parse Beacon".to_string(),
+            beacon_frame.encode(),
+        ));
+    };
+
+    let mut akm_suites: Option<Vec<RsnAkmSuite>> = None;
+    if let Some(rsn_info) = &station_info.rsn_information {
+        akm_suites = Some(rsn_info.akm_suites.to_owned())
     }
 
-    if let Some(rsn_info) = &station_info.rsn_information {
-        ap.add_akm(&rsn_info.akm_suites);
-    }
+    let mut wps_enabled = false;
     if let Some(wps_information) = &station_info.wps_info
         && wps_information.setup_state == WpsSetupState::Configured
     {
-        ap.set_wps(true);
+        wps_enabled = true;
     }
-    if let Some(channel) = &station_info.channel() {
-        let freq: u32;
-        match channel {
-            1..=13 => {
-                freq = 2407 + 5 * *channel as u32;
-            }
-            32..=177 => {
-                freq = 5000 + 5 * *channel as u32;
-            }
-            _ => {
-                return;
-            }
-        }
 
-        ap.set_channel(channel);
-
-        channel_data
-            .get_mut(&freq)
-            .expect("Found AP on unsupported channel")
-            .entry(ap.bssid)
-            .or_insert(ap);
-    }
+    Ok(AP::new(
+        bssid,
+        station_info.essid(),
+        akm_suites,
+        wps_enabled,
+        station_info.channel(),
+    ))
 }
 
-fn parse_probe_response(probe_response: ProbeResponse) {
-    println!("Probe Response:");
-    let (src, dst, bssid) = parse_header(&probe_response.header);
+fn parse_probe_request(probe_response: ProbeResponse) {
+    println!("Probe Request:");
+    if let (Some(src), dst, _) = parse_header(&probe_response.header) {
+        println!("Client {src}->{dst}");
+    }
     // parse_station_info(&probe_response.station_info);
-    println!(
-        "{:<15} -> {:<15} ({:<15})",
-        src.unwrap().to_long_string(),
-        dst.to_long_string(),
-        bssid.unwrap().to_long_string()
-    );
 }
 
 fn parse_association_request(association_request: AssociationRequest) {
@@ -149,7 +144,6 @@ fn to_hex(bytes: &[u8]) -> String {
 }
 
 fn parse_header(header: &impl Addresses) -> (Option<MacAddress>, MacAddress, Option<MacAddress>) {
-    //TODO: Play with the addesses and determine a better fit for src vs bssid
     (
         header.src().copied(),
         header.dest().to_owned(),

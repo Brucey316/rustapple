@@ -1,10 +1,10 @@
-use crate::interfaces::Interface;
-use crate::pineapple::AP;
+use crate::interfaces::{Interface, InterfaceError};
+use crate::pineapple::{AP, Channel, Network, Station};
 use clap::{Args, Parser, ValueHint};
-use libwifi::frame::components::MacAddress;
+use libwifi::error::Error;
 use netlink_wi::{MonitorFlags, interface::InterfaceType};
 use pcap::{Activated, Capture};
-use std::{collections::HashMap, path::PathBuf};
+use std::path::PathBuf;
 use tokio::time::{Duration, sleep, timeout};
 
 mod frames;
@@ -14,7 +14,7 @@ mod pineapple;
 /// A program to attack and gather EAPOL handshakes
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
-struct MyArgs {
+struct Rustapple {
     #[command(flatten)]
     source: InputSource,
 }
@@ -33,55 +33,43 @@ struct InputSource {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = MyArgs::parse();
+    let args = Rustapple::parse();
 
     match (args.source.interface, args.source.input) {
         (Some(iface), None) => {
-            println!("Turning interface on");
-            let interface = Interface::new(&iface).await?;
-            interface.set_up().await?;
-
-            println!("Enabling monitor mode");
-            interface.set_mode(InterfaceType::Monitor).await?;
-            let flags = vec![MonitorFlags::FcsFail, MonitorFlags::Control];
-            interface.set_monitor_flags(flags).await?;
+            let interface = interface_setup(iface).await?;
 
             println!("Searching available channels");
             let interface_channels = interface
                 .get_channels()
-                .await
-                .expect("No Supported Channels Found");
+                .await?;
 
-            let mut channel_data: HashMap<u32, HashMap<MacAddress, AP>> = HashMap::new();
-            let mut freqs = Vec::new();
-
+            let mut network = Network::new();
             for channel in &interface_channels {
-                println!(
-                    "Freq {} {} {}",
-                    channel.frequency,
-                    if channel.no_ir { "(IR)" } else { "" },
-                    if channel.radar_detection { "RADAR" } else { "" }
-                );
-                channel_data.insert(channel.frequency, HashMap::new());
-                freqs.push(channel.frequency);
+                let channel =
+                    Channel::new(channel.frequency, channel.no_ir, channel.radar_detection);
+                network.add_channel(channel);
+                println!("{}", channel);
             }
 
-            for freq in freqs {
-                interface.set_channel(freq).await?;
+            for channel in network.get_channels() {
+                interface.set_channel(channel.frequency).await?;
                 let timeout_duration = Duration::from_secs(10);
 
-                println!("\nScanning Freq: {}", freq);
+                println!("\nScanning Freq: {}", channel.frequency);
                 let capture = Capture::from_device(interface.name.as_str())?
                     .open()?
                     .setnonblock()?;
-                read_packets(capture, Some(timeout_duration), &mut channel_data).await;
+                read_packets(capture, Some(timeout_duration), &mut network).await;
 
                 println!("Channel Report:");
                 println!("---------------");
-                if let Some(aps) = channel_data.get(&freq) {
-                    for ap in aps.values() {
+                if let Some(aps) = network.get_channel_aps(channel) {
+                    for ap in aps {
                         println!("{}", ap);
                     }
+                } else {
+                    println!("ERR: FAILED TO SCAN ON CHANNEL {:#?}", channel);
                 }
             }
 
@@ -92,12 +80,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Device is back down");
         }
         (None, Some(path)) => {
-            let mut channel_data: HashMap<u32, HashMap<MacAddress, AP>> = HashMap::new();
-            channel_data.insert(0u32, HashMap::new());
+            let mut network = Network::new();
 
             println!("Reading from pcap file: {}", path.display());
-            let capture = pcap::Capture::from_file(path)?;
-            read_packets(capture, None, &mut channel_data).await;
+            let capture = pcap::Capture::from_file(path);
+            match capture {
+                Ok(capture) => {
+                    read_packets(capture, None, &mut network).await;
+                }
+                Err(err) => match err {
+                    pcap::Error::PcapError(_) => {
+                        println!("Caught pcapng error")
+                    }
+                    _ => {}
+                },
+            }
         }
         _ => unreachable!(), // clap group guarantees exactly one is set
     }
@@ -105,11 +102,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+
+async fn interface_setup(iface: String) -> Result<Interface, InterfaceError>{
+    println!("Turning interface on");
+    let interface = Interface::new(&iface).await?;
+    interface.set_up().await?;
+
+    println!("Enabling monitor mode");
+    interface.set_mode(InterfaceType::Monitor).await?;
+    let flags = vec![MonitorFlags::FcsFail, MonitorFlags::Control];
+    interface.set_monitor_flags(flags).await?;
+
+    Ok(interface)
+}
+
 async fn read_packets<T: Activated>(
     mut capture: Capture<T>,
     max_timeout: Option<Duration>,
-    aps: &mut HashMap<u32, HashMap<MacAddress, AP>>,
-) {
+    mut network: &Network,
+) -> Result<(), Error> {
+    let mut ap: Option<AP>;
+    let mut station: Option<Station>;
+
     if let Some(max_timeout) = max_timeout {
         let _ = timeout(max_timeout, async {
             loop {
@@ -124,7 +138,7 @@ async fn read_packets<T: Activated>(
                         }
 
                         if let Ok(frame) = libwifi::parse_frame(packet_data, false) {
-                            frames::parse_frame(frame, aps)
+                            let (ap, station) = frames::parse_frame(frame)?;
                         } else {
                             //println!("failed to parse")
                         }
@@ -133,7 +147,7 @@ async fn read_packets<T: Activated>(
                         pcap::Error::TimeoutExpired => {}
                         _ => {
                             println!("Failed to read packet");
-                            return;
+                            return Ok::<(), Error>(());
                         }
                     },
                 }
@@ -152,10 +166,12 @@ async fn read_packets<T: Activated>(
             }
 
             if let Ok(frame) = libwifi::parse_frame(packet_data, false) {
-                frames::parse_frame(frame, aps)
+                let (ap, station) = frames::parse_frame(frame)?;
             } else {
                 println!("failed to parse")
             }
         }
     }
+
+    Ok(())
 }

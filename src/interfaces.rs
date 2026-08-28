@@ -10,6 +10,7 @@ use std::{error::Error, fmt};
 #[derive(Debug)]
 pub enum InterfaceError {
     InterfaceNotFound(String),
+    SupportedChannelsNotFound(String),
     RtNetlinkError(String),
 }
 impl fmt::Display for InterfaceError {
@@ -113,7 +114,7 @@ impl Interface {
         ))
     }
 
-    pub async fn get_channels(&self) -> Option<Vec<Frequency>> {
+    pub async fn get_channels(&self) -> Result<Vec<Frequency>, InterfaceError> {
         if let Ok(phys) = self.get_physical_device().await {
             let mut supported_freqs: Vec<Frequency> = Vec::new();
             if let Some(band2) = phys.band_2ghz {
@@ -128,11 +129,11 @@ impl Interface {
             supported_freqs.retain(|freq| !freq.disabled);
 
             if !supported_freqs.is_empty() {
-                return Some(supported_freqs);
+                return Ok(supported_freqs);
             }
         }
         println!("Failed");
-        None
+        Err( InterfaceError::SupportedChannelsNotFound("No channels found in 2/5/6 GHz bands".to_string()) )
     }
 
     pub async fn set_channel(&self, freq: u32) -> Result<(), InterfaceError> {

@@ -1,5 +1,3 @@
-use crate::interfaces::{Interface, InterfaceError};
-use crate::pineapple::{AP, Channel, Network, Station};
 use clap::{Args, Parser, ValueHint};
 use libwifi::error::Error;
 use netlink_wi::{MonitorFlags, interface::InterfaceType};
@@ -9,7 +7,11 @@ use tokio::time::{Duration, sleep, timeout};
 
 mod frames;
 mod interfaces;
-mod pineapple;
+mod networking;
+
+use frames::{strip_packet, update_network};
+use interfaces::{Interface, InterfaceError};
+use networking::{ap::AP, channel::Channel, network::Network, station::Station};
 
 /// A program to attack and gather EAPOL handshakes
 #[derive(Parser, Debug)]
@@ -40,15 +42,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let interface = interface_setup(iface).await?;
 
             println!("Searching available channels");
-            let interface_channels = interface
-                .get_channels()
-                .await?;
+            let interface_channels = interface.get_channels().await?;
 
             let mut network = Network::new();
             for channel in &interface_channels {
                 let channel =
                     Channel::new(channel.frequency, channel.no_ir, channel.radar_detection);
-                network.add_channel(channel);
+                network.add_channel(&channel);
                 println!("{}", channel);
             }
 
@@ -102,8 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-
-async fn interface_setup(iface: String) -> Result<Interface, InterfaceError>{
+async fn interface_setup(iface: String) -> Result<Interface, InterfaceError> {
     println!("Turning interface on");
     let interface = Interface::new(&iface).await?;
     interface.set_up().await?;
@@ -119,7 +118,7 @@ async fn interface_setup(iface: String) -> Result<Interface, InterfaceError>{
 async fn read_packets<T: Activated>(
     mut capture: Capture<T>,
     max_timeout: Option<Duration>,
-    mut network: &Network,
+    network: &mut Network,
 ) -> Result<(), Error> {
     let mut ap: Option<AP>;
     let mut station: Option<Station>;
@@ -129,16 +128,10 @@ async fn read_packets<T: Activated>(
             loop {
                 match capture.next_packet() {
                     Ok(packet) => {
-                        let packet_data: &[u8];
-                        // Strip radiotap header if it exists
-                        if let Ok((_, subpacket)) = radiotap::Radiotap::parse(&packet) {
-                            packet_data = subpacket;
-                        } else {
-                            packet_data = &packet;
-                        }
+                        let packet_data = strip_packet(&packet);
 
-                        if let Ok(frame) = libwifi::parse_frame(packet_data, false) {
-                            let (ap, station) = frames::parse_frame(frame)?;
+                        if let Ok(frame) = libwifi::parse_frame(packet_data.as_slice(), false) {
+                            let (ap, station) = frames::parse_frame(&frame)?;
                         } else {
                             //println!("failed to parse")
                         }
@@ -157,18 +150,17 @@ async fn read_packets<T: Activated>(
         .await;
     } else {
         while let Ok(packet) = capture.next_packet() {
-            let packet_data: &[u8];
-            // Strip radiotap header if it exists
-            if let Ok((_, subpacket)) = radiotap::Radiotap::parse(&packet) {
-                packet_data = subpacket;
-            } else {
-                packet_data = &packet;
-            }
+            let packet_data = strip_packet(&packet);
 
-            if let Ok(frame) = libwifi::parse_frame(packet_data, false) {
-                let (ap, station) = frames::parse_frame(frame)?;
+            if let Ok(frame) = libwifi::parse_frame(packet_data.as_slice(), false) {
+                let (ap, station) = frames::parse_frame(&frame)?;
+                if ap.is_some() || station.is_some() {
+                    let _ = update_network(ap, station, &frame, network);
+
+                    println!("found ap");
+                }
             } else {
-                println!("failed to parse")
+                //println!("failed to parse")
             }
         }
     }

@@ -14,10 +14,11 @@ pub enum InterfaceError {
     RtNetlinkError(String),
 }
 impl fmt::Display for InterfaceError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::InterfaceNotFound(name) => writeln!(f, "Interface {} not found", name),
             Self::RtNetlinkError(error) => write!(f, "{}", error),
+            Self::SupportedChannelsNotFound(error) => write!(f, "{}", error),
         }
     }
 }
@@ -133,7 +134,9 @@ impl Interface {
             }
         }
         println!("Failed");
-        Err( InterfaceError::SupportedChannelsNotFound("No channels found in 2/5/6 GHz bands".to_string()) )
+        Err(InterfaceError::SupportedChannelsNotFound(
+            "No channels found in 2/5/6 GHz bands".to_string(),
+        ))
     }
 
     pub async fn set_channel(&self, freq: u32) -> Result<(), InterfaceError> {

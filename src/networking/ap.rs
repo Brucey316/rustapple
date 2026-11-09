@@ -1,7 +1,7 @@
 use libwifi::frame::components::{MacAddress, RsnAkmSuite};
 use std::fmt;
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AP {
     pub bssid: MacAddress,
     essid: Option<String>,

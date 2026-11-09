@@ -1,6 +1,6 @@
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq, Copy, Ord, PartialOrd)]
 pub struct Channel {
     pub frequency: u32,
     pub ir: bool,
